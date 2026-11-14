@@ -1,0 +1,36 @@
+[package]
+name = "saucecache-rust"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "SauceCache release watcher"
+
+[dependencies]
+iced = { version = "=0.14.0", default-features = false, features = ["tiny-skia", "tokio", "image", "advanced"] }
+sk-iced = { git = "https://github.com/SkylerWallace/sk-iced", rev = "66f924aad6b4928855f0b5177ee1fa69c352a73c", features = ["components"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
+rumqttc = { version = "0.24", default-features = false, features = ["use-native-tls"] }
+keyring = { version = "3", features = ["windows-native"] }
+url = "2"
+rfd = "0.15"
+webbrowser = "1"
+image = { version = "=0.25.8", default-features = false, features = ["png", "ico"] }
+fs2 = "0.4"
+tray-icon = "0.21"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Globalization"] }
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[profile.dev]
+debug = 0
+
+[profile.dev.package."*"]
+opt-level = 1

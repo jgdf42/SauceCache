@@ -1,0 +1,12 @@
+/target/
+/.tools/
+/reference/
+*.zip
+rustup-init.exe
+config.json
+*.part
+/downloads/
+/SauceCache-Rust.exe
+/SauceCache.exe
+/docs/*.log
+/.package/
