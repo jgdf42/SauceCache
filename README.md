@@ -2,6 +2,8 @@
 
 A release pantry for your favorite repos. SauceCache is a Windows app that watches for new releases and downloads their files into folders organized by repo and version.
 
+<img width="1986" height="1768" alt="saucecache" src="https://github.com/user-attachments/assets/66ba71c5-bc91-4e37-8585-b179758d9843" />
+
 ## Key features
 
 - Scheduled checks or a manual **Check now**.
