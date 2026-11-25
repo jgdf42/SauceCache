@@ -7,6 +7,9 @@ pub struct Repository {
     pub name: String,
     pub unavailable: bool,
     pub provider: crate::source::Provider,
+    /// None inherits the general filter; Some([]) downloads every extension.
+    pub suffixes_override: Option<Vec<String>>,
+    pub keep_latest: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,6 +165,28 @@ pub fn suffixes(input: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn repo_overrides_are_optional_backward_compatible_and_persist_independently() {
+        let old: Repository =
+            serde_json::from_str(r#"{"name":"owner/repo","provider":"GitHub"}"#).unwrap();
+        assert!(old.suffixes_override.is_none());
+        assert!(!old.keep_latest);
+        for filter in [
+            Some(vec![".zip".to_string(), ".msi".into()]),
+            Some(vec![]),
+            None,
+        ] {
+            let repo = Repository {
+                suffixes_override: filter.clone(),
+                keep_latest: true,
+                ..old.clone()
+            };
+            let restored: Repository =
+                serde_json::from_slice(&serde_json::to_vec(&repo).unwrap()).unwrap();
+            assert_eq!(restored.suffixes_override, filter);
+            assert!(restored.keep_latest);
+        }
+    }
     #[test]
     fn mqtt_editor_rejects_partial_values_without_changing_saved_settings() {
         let original = MqttSettings::default();

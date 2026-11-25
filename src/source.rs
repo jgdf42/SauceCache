@@ -40,6 +40,7 @@ pub fn parse(input: &str, selected: Provider) -> Result<Repository, String> {
             name: crate::config::parse_repository(input)?,
             unavailable: false,
             provider: Provider::GitHub,
+            ..Default::default()
         });
     }
     // Plain owner/repo entries (including dots) retain the established GitHub interpretation.
@@ -76,6 +77,7 @@ pub fn parse(input: &str, selected: Provider) -> Result<Repository, String> {
             name: crate::config::parse_repository(input)?,
             unavailable: false,
             provider: Provider::GitHub,
+            ..Default::default()
         });
     } else {
         return Err("Enter a full HTTPS repo URL for this provider".into());
@@ -113,6 +115,7 @@ pub fn parse(input: &str, selected: Provider) -> Result<Repository, String> {
             name: crate::config::parse_repository(&value)?,
             unavailable: false,
             provider,
+            ..Default::default()
         });
     }
     let path = url.path().split("/-/").next().unwrap_or_default();
@@ -152,6 +155,7 @@ pub fn parse(input: &str, selected: Provider) -> Result<Repository, String> {
         name: format!("{}/{}", url.origin().ascii_serialization(), parts.join("/")),
         unavailable: false,
         provider,
+        ..Default::default()
     })
 }
 pub fn browser_url(repo: &Repository) -> String {

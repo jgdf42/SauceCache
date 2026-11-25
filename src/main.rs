@@ -3,10 +3,13 @@ mod activity;
 mod app;
 mod backup;
 mod config;
+mod diagnostics;
 mod github;
 mod local_clock;
 mod mqtt;
+mod repo_menu;
 mod repo_split;
+mod retention;
 mod source;
 mod text_menu;
 mod tray;
@@ -19,13 +22,22 @@ fn main() -> iced::Result {
             .show();
         return Ok(());
     }
-    let lock = std::fs::OpenOptions::new()
+    let lock = match std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .read(true)
         .write(true)
         .open(config::directory().join("instance.lock"))
-        .expect("Open instance lock");
+    {
+        Ok(lock) => lock,
+        Err(error) => {
+            rfd::MessageDialog::new()
+                .set_title("SauceCache")
+                .set_description(format!("Cannot open instance lock: {error}"))
+                .show();
+            return Ok(());
+        }
+    };
     if fs2::FileExt::try_lock_exclusive(&lock).is_err() {
         rfd::MessageDialog::new()
             .set_title("SauceCache")
@@ -33,6 +45,7 @@ fn main() -> iced::Result {
             .show();
         return Ok(());
     }
+    let session = diagnostics::start(&config::directory());
     let icon = image::load_from_memory(include_bytes!("../assets/saucecache.png"))
         .unwrap()
         .resize(64, 64, image::imageops::FilterType::Lanczos3)
@@ -51,6 +64,10 @@ fn main() -> iced::Result {
             ..Default::default()
         })
         .run();
+    match &result {
+        Ok(()) => session.finish(),
+        Err(error) => diagnostics::record("fatal", &format!("UI runtime returned: {error}")),
+    }
     drop(lock);
     result
 }

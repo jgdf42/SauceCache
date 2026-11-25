@@ -1,4 +1,4 @@
-param([string]$Executable = "$PSScriptRoot\target\debug\saucecache-rust.exe", [switch]$About, [ValidateSet('', 'General', 'MQTT', 'About')][string]$Settings = '', [int]$WindowWidth = 0, [switch]$AddRepos, [int]$WindowHeight = 0, [switch]$TestMqtt)
+param([string]$Executable = "$PSScriptRoot\target\debug\saucecache-rust.exe", [switch]$About, [ValidateSet('', 'General', 'MQTT', 'About')][string]$Settings = '', [int]$WindowWidth = 0, [switch]$AddRepos, [int]$WindowHeight = 0, [switch]$TestMqtt, [switch]$RepoOptions)
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 Add-Type @'
@@ -27,6 +27,7 @@ try {
     $previewArgs=@('--smoke-test')
     if ($About) { $previewArgs+='--preview-about' }
     if ($AddRepos) { $previewArgs+='--preview-add' }
+    if ($RepoOptions) { $previewArgs+='--preview-repo-options' }
     if ($TestMqtt) { $previewArgs+='--preview-mqtt-test' }
     if ($Settings) { $previewArgs+='--preview-settings='+@('General','MQTT','About').IndexOf($Settings) }
     $process=Start-Process -FilePath $Executable -ArgumentList $previewArgs -WorkingDirectory $PSScriptRoot -PassThru -RedirectStandardError (Join-Path $previewDir 'smoke-stderr.log') -RedirectStandardOutput (Join-Path $previewDir 'smoke-stdout.log')
@@ -54,6 +55,7 @@ try { [SauceCacheWindow]::PrintWindow($process.MainWindowHandle,$hdc,2) | Out-Nu
 finally { $graphics.ReleaseHdc($hdc); $graphics.Dispose() }
 $previewName=if ($About) {'about-preview.png'} else {'rust-preview.png'}
 if ($AddRepos) { $previewName='add-repos-preview.png' }
+if ($RepoOptions) { $previewName='repo-options-preview.png' }
 if ($Settings) { $previewName='settings-'+$Settings.ToLowerInvariant()+'-preview.png' }
 if ($TestMqtt) { $previewName='mqtt-test-preview.png' }
 $bitmap.Save((Join-Path $previewDir $previewName),[System.Drawing.Imaging.ImageFormat]::Png)

@@ -89,6 +89,11 @@ pub enum Message {
     Edit(text_editor::Action),
     Select(usize),
     OpenRepo(usize),
+    RepoMenu(usize),
+    RepoOptions(usize),
+    RepoOverride(bool),
+    RepoSuffixes(String),
+    RepoKeepLatest(bool),
     RemoveSelect(usize, bool),
     Output(String),
     Browse,
@@ -117,6 +122,10 @@ enum Dialog {
         provider: Provider,
     },
     Remove(BTreeSet<usize>),
+    RepoOptions {
+        index: usize,
+        suffixes: String,
+    },
     Settings {
         draft: Box<Config>,
         password: String,
@@ -127,6 +136,8 @@ enum Dialog {
 }
 pub struct App {
     config: Config,
+    logo: image::Handle,
+    diagnostics_at: Instant,
     dialog: Option<Dialog>,
     error: String,
     mqtt_feedback: String,
@@ -159,7 +170,14 @@ impl App {
     pub fn new() -> (Self, Task<Message>) {
         let loaded = Config::load();
         let error = loaded.as_ref().err().cloned().unwrap_or_default();
-        let config = loaded.unwrap_or_default();
+        let mut config = loaded.unwrap_or_default();
+        let preview_repo = std::env::args().any(|arg| arg == "--preview-repo-options");
+        if preview_repo {
+            let mut repo = source::parse("owner/example", Provider::Auto).unwrap();
+            repo.suffixes_override = Some(vec![".zip".into(), ".msi".into()]);
+            repo.keep_latest = true;
+            config.repositories = vec![repo];
+        }
         let preview_tab = std::env::args().find_map(|arg| {
             if arg == "--preview-about" {
                 Some(2)
@@ -169,20 +187,27 @@ impl App {
                     .filter(|tab| *tab < 3)
             }
         });
-        let preview_dialog = preview_tab
-            .map(|tab| Dialog::Settings {
-                draft: Box::new(config.clone()),
-                password: String::new(),
-                suffixes: config.suffixes.join(", "),
-                port: config.mqtt.port.to_string(),
-                tab,
+        let preview_dialog = preview_repo
+            .then(|| Dialog::RepoOptions {
+                index: 0,
+                suffixes: ".zip, .msi".into(),
             })
             .or_else(|| {
-                std::env::args()
-                    .any(|arg| arg == "--preview-add")
-                    .then(|| Dialog::Add {
-                        content: text_editor::Content::new(),
-                        provider: Provider::Auto,
+                preview_tab
+                    .map(|tab| Dialog::Settings {
+                        draft: Box::new(config.clone()),
+                        password: String::new(),
+                        suffixes: config.suffixes.join(", "),
+                        port: config.mqtt.port.to_string(),
+                        tab,
+                    })
+                    .or_else(|| {
+                        std::env::args()
+                            .any(|arg| arg == "--preview-add")
+                            .then(|| Dialog::Add {
+                                content: text_editor::Content::new(),
+                                provider: Provider::Auto,
+                            })
                     })
             });
         let (tx, rx) = mpsc::channel();
@@ -192,6 +217,12 @@ impl App {
         (
             Self {
                 config,
+                // Keep one image identity: hidden-window layout still runs, but
+                // the software renderer only trims its image cache when drawing.
+                logo: image::Handle::from_bytes(
+                    include_bytes!("../assets/saucecache.png").as_slice(),
+                ),
+                diagnostics_at: Instant::now() + Duration::from_secs(60),
                 dialog: preview_dialog,
                 error,
                 mqtt_feedback: String::new(),
@@ -245,8 +276,10 @@ impl App {
         )
     }
     fn log(&mut self, value: impl Into<String>) {
+        let value = value.into();
+        crate::diagnostics::record("activity", &value);
         self.logs
-            .push(format!("{}  {}", crate::local_clock::now(), value.into()));
+            .push(format!("{}  {}", crate::local_clock::now(), value));
     }
     fn persist(&mut self) {
         if let Err(error) = self.config.save() {
@@ -305,7 +338,7 @@ impl App {
         self.mqtt.publish(&self.config.mqtt,"repositories",serde_json::json!({"active_count":self.config.repositories.len()-down,"unavailable_count":down}));
     }
     fn begin_check(&mut self) {
-        if self.busy {
+        if self.busy || matches!(self.dialog, Some(Dialog::RepoOptions { .. })) {
             return;
         }
         if let Some(until) = self.not_before
@@ -458,6 +491,10 @@ impl App {
                 }
             }
             Message::Tick => {
+                if Instant::now() >= self.diagnostics_at {
+                    crate::diagnostics::heartbeat(self.hidden, self.watching, self.busy);
+                    self.diagnostics_at = Instant::now() + Duration::from_secs(60);
+                }
                 if self.mqtt_save_at.is_some_and(|at| Instant::now() >= at) {
                     self.save_mqtt_edits();
                 }
@@ -516,6 +553,7 @@ impl App {
                 self.window = Some(id);
                 match event {
                     window::Event::CloseRequested => {
+                        crate::diagnostics::record("window", "Close requested");
                         return if self.config.close_to_tray
                             && self.tray.ready.load(Ordering::Relaxed)
                         {
@@ -554,6 +592,7 @@ impl App {
                 self.snapshot();
             }
             Message::Exit => {
+                crate::diagnostics::record("exit", "Exit requested");
                 self.save_mqtt_edits();
                 self.watching = false;
                 self.cancel.store(true, Ordering::Relaxed);
@@ -623,6 +662,63 @@ impl App {
                     && let Err(error) = webbrowser::open(&source::browser_url(repo))
                 {
                     self.error = error.to_string();
+                }
+            }
+            Message::RepoMenu(index) => {
+                if self.dialog.is_none()
+                    && let Some(repo) = self.config.repositories.get(index)
+                {
+                    self.selected = Some(index);
+                    match crate::repo_menu::popup(repo.keep_latest, !self.busy) {
+                        Some(crate::repo_menu::Command::Options) => {
+                            return self.update(Message::RepoOptions(index));
+                        }
+                        Some(crate::repo_menu::Command::KeepLatest) => {
+                            self.config.repositories[index].keep_latest = !repo.keep_latest;
+                            self.persist();
+                        }
+                        None => {}
+                    }
+                }
+            }
+            Message::RepoOptions(index) => {
+                if !self.busy
+                    && self.dialog.is_none()
+                    && let Some(repo) = self.config.repositories.get(index)
+                {
+                    self.selected = Some(index);
+                    self.error.clear();
+                    self.dialog = Some(Dialog::RepoOptions {
+                        index,
+                        suffixes: repo
+                            .suffixes_override
+                            .as_ref()
+                            .unwrap_or(&self.config.suffixes)
+                            .join(", "),
+                    });
+                }
+            }
+            Message::RepoOverride(enabled) => {
+                if let Some(Dialog::RepoOptions { index, suffixes }) = &self.dialog {
+                    self.config.repositories[*index].suffixes_override =
+                        enabled.then(|| config::suffixes(suffixes));
+                    self.persist();
+                }
+            }
+            Message::RepoSuffixes(value) => {
+                if let Some(Dialog::RepoOptions { index, suffixes }) = &mut self.dialog {
+                    *suffixes = value;
+                    if self.config.repositories[*index].suffixes_override.is_some() {
+                        self.config.repositories[*index].suffixes_override =
+                            Some(config::suffixes(suffixes));
+                        self.persist();
+                    }
+                }
+            }
+            Message::RepoKeepLatest(enabled) => {
+                if let Some(Dialog::RepoOptions { index, .. }) = &self.dialog {
+                    self.config.repositories[*index].keep_latest = enabled;
+                    self.persist();
                 }
             }
             Message::RemoveSelect(index, checked) => {
@@ -840,11 +936,7 @@ impl App {
         .spacing(6)
         .align_y(iced::Center);
         let actions = row![
-            image(image::Handle::from_bytes(
-                include_bytes!("../assets/saucecache.png").as_slice()
-            ))
-            .width(24)
-            .height(24),
+            image(self.logo.clone()).width(24).height(24),
             ui.button("Start watching")
                 .text_size(13)
                 .padding([7, 8])
@@ -938,6 +1030,7 @@ impl App {
             repositories = repositories.push(
                 mouse_area(row)
                     .on_press(Message::Select(index))
+                    .on_right_press(Message::RepoMenu(index))
                     .on_double_click(Message::OpenRepo(index)),
             );
         }
@@ -1105,6 +1198,60 @@ impl App {
         };
         let mut content = column![].spacing(14).width(Fill);
         match dialog {
+            Dialog::RepoOptions { index, suffixes } => {
+                let repo = &self.config.repositories[*index];
+                content = content
+                    .push(
+                        row![
+                            text("Repo download overrides").size(18),
+                            Space::new().width(Fill),
+                            ui.button("×")
+                                .id("repo-options-close")
+                                .text_size(14)
+                                .padding(0)
+                                .width(24)
+                                .height(24)
+                                .on_press(Message::Dismiss)
+                        ]
+                        .align_y(iced::Center),
+                    )
+                    .push(text(&repo.name).size(13))
+                    .push(text("Changes save automatically and apply on the next check.").size(12))
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(
+                        ui.checkbox(repo.suffixes_override.is_some())
+                            .label("Override general extension filter")
+                            .on_toggle(Message::RepoOverride),
+                    );
+                if repo.suffixes_override.is_some() {
+                    content = content
+                        .push(text("Limit Extensions to Download (comma separated)").size(13))
+                        .push(
+                            TextMenu::input(
+                                ui.text_input(".zip, .msi, .AppImage", suffixes)
+                                    .on_input(Message::RepoSuffixes),
+                                suffixes,
+                            )
+                            .on_focus(Message::FocusTextBox),
+                        )
+                        .push(
+                            text("Leave blank to download all extensions for this repo.").size(12),
+                        );
+                } else {
+                    let inherited = if self.config.suffixes.is_empty() {
+                        "all extensions".into()
+                    } else {
+                        self.config.suffixes.join(", ")
+                    };
+                    content =
+                        content.push(text(format!("Using general filter: {inherited}")).size(12));
+                }
+                content = content
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(ui.checkbox(repo.keep_latest).label("Keep only newest version").on_toggle(Message::RepoKeepLatest))
+                    .push(text("Remove older tracked downloads only after every matching file in the new release finishes successfully. Failed or stopped downloads keep the previous version.").size(12))
+                    .push(text("Existing untracked folders and manually added files are kept. Current downloads are tracked after the next successful check.").size(12));
+            }
             Dialog::Add {
                 content: input,
                 provider,
@@ -1328,6 +1475,7 @@ impl App {
             Dialog::Settings { .. } => 500,
             Dialog::Remove(_) => 350,
             Dialog::Add { .. } => 380,
+            Dialog::RepoOptions { .. } => 390,
         };
         let body: Element<'_, Message> = if matches!(dialog, Dialog::Add { .. }) {
             content.height(height).into()
@@ -1394,11 +1542,13 @@ impl App {
         };
         let dialog = container(panel)
             .padding(18)
-            .width(if matches!(dialog, Dialog::Settings { .. }) {
-                480
-            } else {
-                600
-            })
+            .width(
+                if matches!(dialog, Dialog::Settings { .. } | Dialog::RepoOptions { .. }) {
+                    480
+                } else {
+                    600
+                },
+            )
             .style(|theme: &Theme| container::Style {
                 border: iced::Border {
                     width: 2.0,
@@ -1410,6 +1560,8 @@ impl App {
         let scope = FocusScope::new(dialog);
         if matches!(self.dialog, Some(Dialog::Settings { .. })) {
             scope.autofocus("settings-close").into()
+        } else if matches!(self.dialog, Some(Dialog::RepoOptions { .. })) {
+            scope.autofocus("repo-options-close").into()
         } else {
             scope.into()
         }
@@ -1595,6 +1747,28 @@ mod tests {
         }
         let (mut app, _) = App::new();
         assert!(app.mqtt_feedback.is_empty());
+        {
+            use iced::advanced::{layout, widget::Tree};
+            let renderer = iced::Renderer::new(iced::Font::DEFAULT, iced::Pixels(16.0));
+            let limits = layout::Limits::new(iced::Size::ZERO, iced::Size::new(660.0, 560.0));
+            let mut baseline = 0;
+            // A hidden window still lays out views, but does not draw/trim the
+            // renderer's raster cache. Rebuilding those views must stay bounded.
+            for index in 0..64 {
+                let mut view = app.view();
+                let mut tree = Tree::new(&view);
+                let _ = view.as_widget_mut().layout(&mut tree, &renderer, &limits);
+                if index == 3 {
+                    baseline = crate::diagnostics::process_memory().unwrap().0;
+                }
+            }
+            let after = crate::diagnostics::process_memory().unwrap().0;
+            assert!(
+                after.saturating_sub(baseline) < 32 * 1024 * 1024,
+                "Hidden UI layouts leaked {} bytes",
+                after.saturating_sub(baseline)
+            );
+        }
         let original =
             source::parse("https://self-hosted.example/team/project", Provider::GitLab).unwrap();
         app.config.repositories.push(original.clone());
@@ -1611,6 +1785,31 @@ mod tests {
             Config::load().unwrap().repositories[0].provider,
             Provider::Gitea
         );
+        let _ = app.update(Message::RepoOptions(0));
+        let _ = app.update(Message::RepoOverride(true));
+        let _ = app.update(Message::RepoSuffixes(".zip, .MSI".into()));
+        let _ = app.update(Message::RepoKeepLatest(true));
+        let saved = Config::load().unwrap();
+        assert_eq!(
+            saved.repositories[0].suffixes_override,
+            Some(vec![".zip".into(), ".MSI".into()])
+        );
+        assert!(saved.repositories[0].keep_latest);
+        assert!(saved.suffixes.is_empty());
+        let _ = app.update(Message::RepoSuffixes(String::new()));
+        assert_eq!(
+            Config::load().unwrap().repositories[0].suffixes_override,
+            Some(vec![])
+        );
+        let _ = app.update(Message::RepoOverride(false));
+        assert!(
+            Config::load().unwrap().repositories[0]
+                .suffixes_override
+                .is_none()
+        );
+        let _ = app.update(Message::RepoOverride(true));
+        let _ = app.update(Message::RepoSuffixes(".zip".into()));
+        let _ = app.update(Message::Dismiss);
         let _ = app.update(Message::Settings);
         let _ = app.update(Message::Toggle(Toggle::Tray, false));
         let _ = app.update(Message::Field(Field::Suffixes, ".zip, .msi".into()));
@@ -1631,6 +1830,11 @@ mod tests {
         drop(app);
         let (mut reopened, _) = App::new();
         assert_eq!(reopened.config.mqtt.port, 8883);
+        assert_eq!(
+            reopened.config.repositories[0].suffixes_override,
+            Some(vec![".zip".into()])
+        );
+        assert!(reopened.config.repositories[0].keep_latest);
         let _ = reopened.update(Message::Settings);
         let _ = reopened.update(Message::Field(Field::Port, String::new()));
         let _ = reopened.update(Message::Toggle(Toggle::Tray, true));

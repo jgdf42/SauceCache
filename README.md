@@ -9,7 +9,8 @@ A release pantry for your favorite repos. SauceCache is a Windows app that watch
 - Scheduled checks or a manual **Check now**.
 - Public releases from GitHub, GitLab, Gitea/Forgejo (including Codeberg), and SourceForge.
 - Automatic detection of public self-hosted GitLab and Gitea/Forgejo servers.
-- File extension filters and automatic skipping of files already downloaded.
+- File extension filters, per-repo overrides, and automatic skipping of files already downloaded.
+- Per-repo version retention: keep all versions or remove older tracked downloads after a successful update.
 - Status badges for unavailable repos, with records kept for future rechecks.
 - System tray support, light/dark themes, and settings that save automatically.
 - Optional MQTT notifications for app status, repo counts, and downloads.
@@ -40,6 +41,6 @@ cargo build --release --locked
 
 ## Credits
 
-Version 0.1.0. Thanks to [SkylerWallace / sk-iced](https://github.com/SkylerWallace/sk-iced) for the UI toolkit and design assistance.
+Version 0.1.2. Thanks to [SkylerWallace / sk-iced](https://github.com/SkylerWallace/sk-iced) for the UI toolkit and design assistance.
 
 See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and [licenses/](licenses/) for third-party notices.

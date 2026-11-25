@@ -1,6 +1,6 @@
 [package]
 name = "saucecache-rust"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
 rust-version = "1.88"
 description = "SauceCache release watcher"
@@ -23,7 +23,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 zip = { version = "=2.4.2", default-features = false, features = ["deflate"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Globalization"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_Globalization", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
 
 [profile.release]
 lto = "thin"

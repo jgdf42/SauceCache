@@ -397,6 +397,8 @@ impl Watcher {
             let result = self.latest_source(&repo);
             if let Some(mut detected) = self.resolved.get(&repo.name).cloned() {
                 detected.unavailable = repo.unavailable;
+                detected.suffixes_override = repo.suffixes_override.clone();
+                detected.keep_latest = repo.keep_latest;
                 if detected.provider != repo.provider || detected.name != repo.name {
                     let _ = send.send(Event::SourceResolved {
                         previous: repo.name.clone(),
@@ -445,20 +447,35 @@ impl Watcher {
                     continue;
                 }
             };
-            let folder = PathBuf::from(&config.output_dir)
-                .join(storage)
-                .join(tag_folder(&release.tag_name));
-            for asset in release.assets.iter().filter(|a| {
-                config.suffixes.is_empty()
-                    || config
-                        .suffixes
-                        .iter()
-                        .any(|suffix| a.name.ends_with(suffix))
-            }) {
+            let root = PathBuf::from(&config.output_dir).join(storage);
+            let version = tag_folder(&release.tag_name);
+            let folder = root.join(&version);
+            let suffixes = repo.suffixes_override.as_ref().unwrap_or(&config.suffixes);
+            let assets: Vec<_> = release
+                .assets
+                .iter()
+                .filter(|asset| {
+                    suffixes.is_empty()
+                        || suffixes.iter().any(|suffix| {
+                            asset.name.to_lowercase().ends_with(&suffix.to_lowercase())
+                        })
+                })
+                .collect();
+            if assets.is_empty() {
+                let _ = send.send(Event::Log(format!(
+                    "{name}: no assets match the extension filter; previous versions kept"
+                )));
+                continue;
+            }
+            let mut completed = true;
+            let mut files = Vec::new();
+            for asset in assets {
                 if cancel.load(Ordering::Relaxed) {
+                    completed = false;
                     break;
                 }
                 if !safe_filename(&asset.name) {
+                    completed = false;
                     let _ = send.send(Event::Log(format!(
                         "Skipped unsafe filename: {}",
                         asset.name
@@ -468,10 +485,22 @@ impl Watcher {
                 let target = folder.join(&asset.name);
                 if already_saved(asset, &target) {
                     let _ = send.send(Event::Log(format!("Already saved: {}", asset.name)));
+                    if let Ok(metadata) = target.metadata() {
+                        files.push(crate::retention::DownloadedFile {
+                            name: asset.name.clone(),
+                            size: metadata.len(),
+                        });
+                    } else {
+                        completed = false;
+                    }
                     continue;
                 }
                 match self.download(asset, &target, &cancel, &send) {
                     Ok(size) => {
+                        files.push(crate::retention::DownloadedFile {
+                            name: asset.name.clone(),
+                            size,
+                        });
                         let _ = send.send(Event::Log(format!("Saved: {}", target.display())));
                         let _ = send.send(Event::Download {
                             repository: name.clone(),
@@ -481,8 +510,28 @@ impl Watcher {
                         });
                     }
                     Err(error) => {
+                        completed = false;
                         let _ = send.send(Event::Log(error));
                     }
+                }
+            }
+            if completed && !cancel.load(Ordering::Relaxed) {
+                match crate::retention::complete(
+                    &root,
+                    &name,
+                    &version,
+                    files,
+                    repo.keep_latest,
+                    &cancel,
+                ) {
+                    Ok(removed) if removed > 0 => {
+                        let _ = send.send(Event::Log(format!("{name}: removed {removed} older downloaded file(s) after completing {}", release.tag_name)));
+                    }
+                    Err(error) => {
+                        let _ =
+                            send.send(Event::Log(format!("{name}: older versions kept: {error}")));
+                    }
+                    _ => {}
                 }
             }
         }
@@ -504,6 +553,12 @@ impl Watcher {
             if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
                 return Err("Unsupported asset URL".into());
             }
+            #[cfg(test)]
+            let url = if let Some(origin) = &self.source_test_origin {
+                url::Url::parse(&format!("{origin}{}", url.path())).unwrap()
+            } else {
+                url
+            };
             let mut response = self
                 .client
                 .get(url)
@@ -749,6 +804,153 @@ pub fn tag_folder(tag: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct DownloadFixture(PathBuf);
+    impl DownloadFixture {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "saucecache-check-{}-{}",
+                std::process::id(),
+                chrono::Utc::now().timestamp_nanos_opt().unwrap()
+            ));
+            fs::create_dir_all(root.join("repo/v1")).unwrap();
+            fs::write(root.join("repo/v1/old.zip"), b"old").unwrap();
+            crate::retention::complete(
+                &root.join("repo"),
+                "owner/repo",
+                "v1",
+                vec![crate::retention::DownloadedFile {
+                    name: "old.zip".into(),
+                    size: 3,
+                }],
+                false,
+                &AtomicBool::new(false),
+            )
+            .unwrap();
+            Self(root)
+        }
+        fn config(&self, filters: Option<Vec<&str>>) -> Config {
+            let mut repo = source::parse("owner/repo", Provider::GitHub).unwrap();
+            repo.keep_latest = true;
+            repo.suffixes_override =
+                filters.map(|filters| filters.into_iter().map(String::from).collect());
+            Config {
+                repositories: vec![repo],
+                output_dir: self.0.to_string_lossy().into(),
+                suffixes: vec![".zip".into()],
+                ..Default::default()
+            }
+        }
+    }
+    impl Drop for DownloadFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    const FILTERED_RELEASE: &str = r#"[{"tag_name":"v2","assets":[{"name":"app.ZIP","size":3,"browser_download_url":"https://cdn.example/app.zip"},{"name":"app.msi","size":3,"browser_download_url":"https://cdn.example/app.msi"}]}]"#;
+    #[test]
+    fn repo_filter_replaces_general_filter_and_cleanup_waits_for_all_files() {
+        let directory = DownloadFixture::new();
+        let previous = directory.0.join("repo/v1/old.zip");
+        let (mut watcher, server) = fixture_observed(
+            vec![(200, "", FILTERED_RELEASE), (200, "", "msi")],
+            move |_| assert!(previous.exists()),
+        );
+        let (tx, _) = std::sync::mpsc::channel();
+        watcher.check(
+            directory.config(Some(vec![".msi"])),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
+        let requests = server.join().unwrap();
+        assert!(requests[1].starts_with("GET /app.msi "));
+        assert!(!directory.0.join("repo/v2/app.ZIP").exists());
+        assert!(directory.0.join("repo/v2/app.msi").exists());
+        assert!(!directory.0.join("repo/v1").exists());
+    }
+    #[test]
+    fn empty_repo_filter_downloads_all_and_only_then_removes_previous_version() {
+        let directory = DownloadFixture::new();
+        let previous = directory.0.join("repo/v1/old.zip");
+        let (mut watcher, server) = fixture_observed(
+            vec![
+                (200, "", FILTERED_RELEASE),
+                (200, "", "zip"),
+                (200, "", "msi"),
+            ],
+            move |_| assert!(previous.exists()),
+        );
+        let (tx, _) = std::sync::mpsc::channel();
+        watcher.check(
+            directory.config(Some(vec![])),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
+        server.join().unwrap();
+        assert!(directory.0.join("repo/v2/app.ZIP").exists());
+        assert!(directory.0.join("repo/v2/app.msi").exists());
+        assert!(!directory.0.join("repo/v1").exists());
+    }
+    #[test]
+    fn failed_second_download_keeps_previous_release_and_retry_completes_it() {
+        let directory = DownloadFixture::new();
+        let (mut watcher, server) = fixture(vec![
+            (200, "", FILTERED_RELEASE),
+            (200, "", "zip"),
+            (500, "", "bad"),
+        ]);
+        let (tx, _) = std::sync::mpsc::channel();
+        watcher.check(
+            directory.config(Some(vec![])),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
+        server.join().unwrap();
+        assert!(directory.0.join("repo/v1/old.zip").exists());
+        assert!(directory.0.join("repo/v2/app.ZIP").exists());
+        assert!(!directory.0.join("repo/v2/app.msi").exists());
+        let (mut watcher, server) = fixture(vec![(200, "", FILTERED_RELEASE), (200, "", "msi")]);
+        let (tx, _) = std::sync::mpsc::channel();
+        watcher.check(
+            directory.config(Some(vec![])),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
+        server.join().unwrap();
+        assert!(!directory.0.join("repo/v1").exists());
+    }
+    #[test]
+    fn no_matches_size_mismatch_and_cancellation_keep_previous_release() {
+        let directory = DownloadFixture::new();
+        let (mut watcher, server) = fixture(vec![(200, "", FILTERED_RELEASE)]);
+        let (tx, _) = std::sync::mpsc::channel();
+        watcher.check(
+            directory.config(Some(vec![".exe"])),
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        );
+        server.join().unwrap();
+        assert!(directory.0.join("repo/v1/old.zip").exists());
+        let (mut watcher, server) = fixture(vec![(200, "", FILTERED_RELEASE), (200, "", "short")]);
+        let (tx, _) = std::sync::mpsc::channel();
+        watcher.check(directory.config(None), Arc::new(AtomicBool::new(false)), tx);
+        server.join().unwrap();
+        assert!(directory.0.join("repo/v1/old.zip").exists());
+        assert!(!directory.0.join("repo/v2/app.ZIP").exists());
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stop = cancel.clone();
+        let (mut watcher, server) = fixture_observed(
+            vec![(200, "", FILTERED_RELEASE), (200, "", "zip")],
+            move |index| {
+                if index == 1 {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            },
+        );
+        let (tx, _) = std::sync::mpsc::channel();
+        watcher.check(directory.config(None), cancel, tx);
+        server.join().unwrap();
+        assert!(directory.0.join("repo/v1/old.zip").exists());
+    }
     #[test]
     fn detects_gitea_api_and_reuses_the_resolved_provider() {
         let (mut watcher, server) = fixture(vec![
@@ -1090,11 +1292,17 @@ mod tests {
     fn fixture(
         responses: Vec<(u16, &'static str, &'static str)>,
     ) -> (Watcher, std::thread::JoinHandle<Vec<String>>) {
+        fixture_observed(responses, |_| {})
+    }
+    fn fixture_observed(
+        responses: Vec<(u16, &'static str, &'static str)>,
+        observe: impl Fn(usize) + Send + 'static,
+    ) -> (Watcher, std::thread::JoinHandle<Vec<String>>) {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = std::thread::spawn(move || {
             let mut requests = vec![];
-            for (code, headers, body) in responses {
+            for (index, (code, headers, body)) in responses.into_iter().enumerate() {
                 let (mut stream, _) = listener.accept().unwrap();
                 stream
                     .set_read_timeout(Some(Duration::from_secs(5)))
@@ -1106,6 +1314,7 @@ mod tests {
                     bytes.push(byte[0]);
                 }
                 requests.push(String::from_utf8_lossy(&bytes).to_string());
+                observe(index);
                 write!(stream,"HTTP/1.1 {code} Test\r\nContent-Length: {}\r\nConnection: close\r\n{headers}\r\n{body}",body.len()).unwrap();
             }
             requests

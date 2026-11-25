@@ -1,7 +1,7 @@
 1 ICON "assets/saucecache.ico"
 1 VERSIONINFO
-FILEVERSION 0,1,0,0
-PRODUCTVERSION 0,1,0,0
+FILEVERSION 0,1,2,0
+PRODUCTVERSION 0,1,2,0
 BEGIN
   BLOCK "StringFileInfo"
   BEGIN
@@ -9,8 +9,8 @@ BEGIN
     BEGIN
       VALUE "FileDescription", "SauceCache\0"
       VALUE "ProductName", "SauceCache\0"
-      VALUE "FileVersion", "0.1.0\0"
-      VALUE "ProductVersion", "0.1.0\0"
+      VALUE "FileVersion", "0.1.2\0"
+      VALUE "ProductVersion", "0.1.2\0"
     END
   END
   BLOCK "VarFileInfo"

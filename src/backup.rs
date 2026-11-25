@@ -292,6 +292,8 @@ mod tests {
             .repositories
             .push(source::parse("owner/repo", source::Provider::GitHub).unwrap());
         config.repositories[0].unavailable = true;
+        config.repositories[0].suffixes_override = Some(vec![".msi".into()]);
+        config.repositories[0].keep_latest = true;
         config.repositories.push(
             source::parse("https://gitlab.com/group/project", source::Provider::GitHub).unwrap(),
         );
